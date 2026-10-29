@@ -1,52 +1,49 @@
 ---
 - name: Deploy Dockerized Cards Microservice to ASG Nodes
   hosts: role_cards_backend
-  become: yes
+  become: true
   vars:
+    ecr_url: "107203103587.dkr.ecr.us-east-1.amazonaws.com"
     aws_region: "us-east-1"
-    account_id: "107203103587"
-    app_version: "{{ version | default('v1') }}"
-    ecr_url: "{{ account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
 
   tasks:
     - name: Ensure Docker service is running
-      systemd:
+      ansible.builtin.service:
         name: docker
         state: started
-        enabled: yes
 
     - name: Authenticate Docker with Amazon ECR
-      shell: |
+      ansible.builtin.shell: |
         aws ecr get-login-password --region {{ aws_region }} | docker login --username AWS --password-stdin {{ ecr_url }}
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
 
     - name: Stop and remove existing application container (if running)
-      shell: |
-        docker stop cards-service || true
-        docker rm cards-service || true
+      community.docker.docker_container:
+        name: cards-service
+        state: absent
 
     - name: Pull updated image from ECR
-      shell: |
-        docker pull {{ ecr_url }}/cards-service:{{ app_version }}
+      community.docker.docker_image:
+        name: "{{ ecr_url }}/cards-service:{{ app_version }}"
+        source: pull
+        force_source: true
 
     - name: Run fresh Cards Microservice container
-      shell: |
-        docker run -d \
-          --name cards-service \
-          --restart always \
-          -p 8085:8085 \
-          -e SPRING_PROFILES_ACTIVE=prod \
-          {{ ecr_url }}/cards-service:{{ app_version }}
+      community.docker.docker_container:
+        name: cards-service
+        image: "{{ ecr_url }}/cards-service:{{ app_version }}"
+        state: started
+        restart_policy: always
+        published_ports:
+          - "8085:8081"
+          - "8081:8081"
 
     - name: Verify API health endpoint
-      uri:
-        url: "http://localhost:8085/api/cards?page=0&size=1"
-        method: GET
+      ansible.builtin.uri:
+        url: "http://localhost:8085/swagger-ui/index.html"
         status_code: 200
-      register: api_check
-      until: api_check.status == 200
+      register: result
+      until: result.status == 200
       retries: 15
       delay: 5
-
-    - name: Print Deployment Status
-      debug:
-        msg: "Cards microservice version {{ app_version }} deployed and healthy on port 8085."
