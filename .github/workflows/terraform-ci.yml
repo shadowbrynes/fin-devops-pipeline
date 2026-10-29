@@ -1,0 +1,42 @@
+name: "Terraform CI"
+
+on:
+  pull_request:
+    branches: [ "main", "master" ]
+    paths:
+      - "terraform/**"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate-and-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::107203103587:role/GitHubActionsTerraformRole
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.0
+
+      - name: Check HCL Format
+        run: terraform -chdir=terraform fmt -check
+
+      - name: Initialize Terraform
+        run: terraform -chdir=terraform init
+
+      - name: Validate Configurations
+        run: terraform -chdir=terraform validate
+
+      - name: Plan Infrastructure Changes
+        run: terraform -chdir=terraform plan -no-color

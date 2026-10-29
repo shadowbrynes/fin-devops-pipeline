@@ -1,0 +1,10 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.pem
+id_rsa*
+venv/
+.venvs/
+__pycache__/
+*.retry
