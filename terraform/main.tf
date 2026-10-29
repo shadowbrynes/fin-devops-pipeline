@@ -178,3 +178,160 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
     AutoScalingGroupName = aws_autoscaling_group.cards_asg.name
   }
 }
+
+# -----------------------------------------------------------------------------
+# CI/CD CONTROLLER: JENKINS & SONARQUBE QUALITY GATE
+# -----------------------------------------------------------------------------
+
+resource "aws_security_group" "ci_cd_sg" {
+  name        = "ci-cd-sg"
+  description = "Security group for Jenkins and SonarQube Quality Gate server"
+  vpc_id      = data.aws_vpc.default.id
+
+  # SSH
+  ingress {
+    description = "SSH access"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Jenkins Web UI
+  ingress {
+    description = "Jenkins UI"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # SonarQube Web UI
+  ingress {
+    description = "SonarQube UI"
+    from_port   = 9000
+    to_port     = 9000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ci-cd-sg"
+  }
+}
+
+resource "aws_instance" "ci_cd_server" {
+  ami                    = data.aws_ami.amazon_linux_2.id
+  instance_type          = "t3.medium"
+  key_name               = var.key_name
+  vpc_security_group_ids = [aws_security_group.ci_cd_sg.id]
+
+  root_block_device {
+    volume_size           = 30
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
+
+  user_data = <<-EOF
+              #!/bin/bash
+              set -e
+
+              # Optimize memory limits for Elasticsearch/SonarQube
+              sysctl -w vm.max_map_count=262144
+              echo "vm.max_map_count=262144" >> /etc/sysctl.conf
+              sysctl -w fs.file-max=65536
+              echo "fs.file-max=65536" >> /etc/sysctl.conf
+
+              # Install Docker
+              yum update -y
+              amazon-linux-extras install docker -y || yum install -y docker
+              systemctl enable docker
+              systemctl start docker
+              usermod -aG docker ec2-user
+
+              # Create workspace for docker-compose
+              mkdir -p /opt/ci-cd
+              cd /opt/ci-cd
+
+              cat << 'DOCKERCOMPOSE' > docker-compose.yml
+              version: '3.8'
+
+              services:
+                jenkins:
+                  image: jenkins/jenkins:lts-jdk17
+                  container_name: jenkins
+                  restart: always
+                  privileged: true
+                  user: root
+                  ports:
+                    - "8080:8080"
+                    - "50000:50000"
+                  volumes:
+                    - /var/run/docker.sock:/var/run/docker.sock
+                    - /usr/bin/docker:/usr/bin/docker
+                    - jenkins_home:/var/jenkins_home
+
+                sonarqube:
+                  image: sonarqube:lts-community
+                  container_name: sonarqube
+                  restart: always
+                  ports:
+                    - "9000:9000"
+                  ulimits:
+                    nofile:
+                      soft: 65536
+                      hard: 65536
+                  volumes:
+                    - sonarqube_data:/opt/sonarqube/data
+                    - sonarqube_extensions:/opt/sonarqube/extensions
+                    - sonarqube_logs:/opt/sonarqube/logs
+
+              volumes:
+                jenkins_home:
+                sonarqube_data:
+                sonarqube_extensions:
+                sonarqube_logs:
+              DOCKERCOMPOSE
+
+              # Install Docker Compose binary
+              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              chmod +x /usr/local/bin/docker-compose
+              ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+
+              # Launch Jenkins & SonarQube
+              docker-compose up -d
+              EOF
+
+  tags = {
+    Name = "Jenkins-SonarQube-Gate-Server"
+    Role = "ci-cd-controller"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# DATA SOURCE: AMAZON LINUX 2 AMI
+# -----------------------------------------------------------------------------
+data "aws_ami" "amazon_linux_2" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# -----------------------------------------------------------------------------
+# DATA SOURCE: AMAZON LINUX 2 AMI
