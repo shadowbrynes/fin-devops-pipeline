@@ -17,7 +17,7 @@ pipeline {
             steps {
                 withSonarQubeEnv('SonarQube-Server') {
                     dir('app') {
-                        sh 'mvn clean verify sonar:sonar -Dsonar.projectKey=cards-service'
+                        sh 'mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dsonar.projectKey=cards-service'
                     }
                 }
             }
