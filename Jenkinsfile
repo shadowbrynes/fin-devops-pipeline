@@ -32,6 +32,10 @@ pipeline {
         }
 
         stage('Build & Push to ECR') {
+            environment {
+                AWS_SHARED_CREDENTIALS_FILE = '/var/jenkins_home/.aws/credentials'
+                AWS_DEFAULT_REGION          = 'us-east-1'
+            }
             steps {
                 dir('app') {
                     sh '''
@@ -46,11 +50,20 @@ pipeline {
         }
 
         stage('Deploy with Ansible') {
+            environment {
+                AWS_SHARED_CREDENTIALS_FILE = '/var/jenkins_home/.aws/credentials'
+                AWS_DEFAULT_REGION          = 'us-east-1'
+                ANSIBLE_HOST_KEY_CHECKING   = 'False'
+            }
             steps {
-                sh '''
-                    cd ansible
-                    ansible-playbook -i inventory_aws_ec2.yml deploy-app.yml --extra-vars "app_version=${BUILD_NUMBER}"
-                '''
+                dir('ansible') {
+                    sh '''
+                        ansible-playbook -i inventory_aws_ec2.yml deploy-app.yml \
+                          --private-key /var/jenkins_home/.ssh/id_rsa \
+                          -u ec2-user \
+                          --extra-vars "app_version=${BUILD_NUMBER}"
+                    '''
+                }
             }
         }
     }
