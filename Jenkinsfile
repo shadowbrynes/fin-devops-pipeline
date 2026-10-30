@@ -6,10 +6,27 @@ pipeline {
         jdk 'JDK-17'
     }
 
+    environment {
+        AWS_SHARED_CREDENTIALS_FILE = '/var/jenkins_home/.aws/credentials'
+        AWS_DEFAULT_REGION          = 'us-east-1'
+        ANSIBLE_HOST_KEY_CHECKING   = 'False'
+    }
+
     stages {
         stage('Checkout Source') {
             steps {
                 checkout scm
+            }
+        }
+
+        stage('Terraform Provision Infrastructure') {
+            steps {
+                dir('terraform') {
+                    sh '''
+                        terraform init
+                        terraform apply -auto-approve
+                    '''
+                }
             }
         }
 
@@ -32,10 +49,6 @@ pipeline {
         }
 
         stage('Build & Push to ECR') {
-            environment {
-                AWS_SHARED_CREDENTIALS_FILE = '/var/jenkins_home/.aws/credentials'
-                AWS_DEFAULT_REGION          = 'us-east-1'
-            }
             steps {
                 dir('app') {
                     sh '''
@@ -49,16 +62,11 @@ pipeline {
             }
         }
 
-        stage('Deploy with Ansible') {
-            environment {
-                AWS_SHARED_CREDENTIALS_FILE = '/var/jenkins_home/.aws/credentials'
-                AWS_DEFAULT_REGION          = 'us-east-1'
-                ANSIBLE_HOST_KEY_CHECKING   = 'False'
-            }
+        stage('Deploy via Ansible Dynamic Inventory') {
             steps {
                 dir('ansible') {
                     sh '''
-                        ansible-playbook -i inventory_aws_ec2.yml deploy-app.yml \
+                        ansible-playbook -i inventory_aws_ec2.yml site.yml \
                           --private-key /var/jenkins_home/.ssh/id_rsa \
                           -u ec2-user \
                           --extra-vars "app_version=${BUILD_NUMBER}"

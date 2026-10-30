@@ -1,0 +1,28 @@
+---
+- name: Ensure Docker and dependencies are installed
+  ansible.builtin.dnf:
+    name:
+      - docker
+      - git
+    state: present
+
+- name: Ensure Docker service is running and enabled
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Add ec2-user to docker group
+  ansible.builtin.user:
+    name: ec2-user
+    groups: docker
+    append: true
+
+- name: Check if Node Exporter container is running
+  community.docker.docker_container:
+    name: node-exporter
+    image: prom/node-exporter:latest
+    state: started
+    restart_policy: always
+    published_ports:
+      - "9100:9100"

@@ -1,216 +1,36 @@
-# Imported SNS Topic for Monitoring Alerts
-resource "aws_sns_topic" "alerts" {
-  name = "cards-service-alerts"
-}
-
-# 1. Look up Default VPC and Subnets if none provided
-data "aws_vpc" "default" {
-  default = true
-}
-
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
-
-# 2. Look up latest Amazon Linux 2023 AMI
-data "aws_ami" "amazon_linux_2023" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.*-x86_64"]
-  }
-}
-
-# 3. AWS ECR Repository for Cards Microservice
-resource "aws_ecr_repository" "cards_repo" {
-  name                 = "cards-service"
-  image_tag_mutability = "MUTABLE"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-}
-
-# 4. IAM Role & Instance Profile for EC2 (Allows SSM and ECR Pull)
-resource "aws_iam_role" "ec2_app_role" {
-  name = "cards-service-ec2-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ssm_policy" {
-  role       = aws_iam_role.ec2_app_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_role_policy_attachment" "ecr_readonly" {
-  role       = aws_iam_role.ec2_app_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "cards-service-ec2-profile"
-  role = aws_iam_role.ec2_app_role.name
-}
-
-# 5. Security Group
-resource "aws_security_group" "cards_service_sg" {
-  name        = "cards-service-sg"
-  description = "Security group for Cards Microservice"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description = "Allow HTTP to Cards Service"
-    from_port   = 8085
-    to_port     = 8085
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "Allow SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "cards-service-sg"
-  }
-}
-
-# 6. Launch Template
-resource "aws_launch_template" "cards_lt" {
-  name_prefix   = "cards-service-lt-"
-  image_id      = data.aws_ami.amazon_linux_2023.id
-  instance_type = "t3.medium"
-  key_name      = var.key_name != "" ? var.key_name : null
-
-  vpc_security_group_ids = [aws_security_group.cards_service_sg.id]
-
-  iam_instance_profile {
-    name = aws_iam_instance_profile.ec2_profile.name
-  }
-
-  tag_specifications {
-    resource_type = "instance"
-    tags = {
-      Name = "cards-service-node"
-      Role = "cards-backend"
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
     }
   }
-
-  user_data = base64encode(<<-EOF
-              #!/bin/bash
-              dnf update -y
-              dnf install -y docker python3-pip
-              systemctl enable --now docker
-              usermod -aG docker ec2-user
-              pip3 install botocore boto3
-              EOF
-  )
 }
 
-# 7. Auto Scaling Group
-resource "aws_autoscaling_group" "cards_asg" {
-  name_prefix         = "cards-asg-"
-  desired_capacity    = 1
-  max_size            = 2
-  min_size            = 1
-  vpc_zone_identifier = data.aws_subnets.default.ids
-
-  launch_template {
-    id      = aws_launch_template.cards_lt.id
-    version = "$Latest"
-  }
-
-  tag {
-    key                 = "Role"
-    value               = "cards-backend"
-    propagate_at_launch = true
-  }
-
-  tag {
-    key                 = "Name"
-    value               = "cards-service-node"
-    propagate_at_launch = true
-  }
+provider "aws" {
+  region = var.aws_region
 }
 
-# 8. CloudWatch High CPU Alarm -> SNS Topic
-resource "aws_cloudwatch_metric_alarm" "high_cpu" {
-  alarm_name          = "cards-service-high-cpu"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = 120
-  statistic           = "Average"
-  threshold           = 80
-  alarm_description   = "Triggers when CPU exceeds 80% on Cards nodes"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-
-  dimensions = {
-    AutoScalingGroupName = aws_autoscaling_group.cards_asg.name
-  }
+# --- VPC & Networking ---
+module "vpc" {
+  source             = "./modules/vpc"
+  cidr_block         = "10.0.0.0/16"
+  public_subnets     = ["10.0.1.0/24", "10.0.2.0/24"]
+  private_subnets    = ["10.0.10.0/24", "10.0.20.0/24"]
+  availability_zones = ["${var.aws_region}a", "${var.aws_region}b"]
+  environment        = var.environment
 }
 
-# -----------------------------------------------------------------------------
-# CI/CD CONTROLLER: JENKINS & SONARQUBE QUALITY GATE
-# -----------------------------------------------------------------------------
+# --- Security Groups ---
+resource "aws_security_group" "alb_sg" {
+  name        = "${var.environment}-alb-sg"
+  description = "Allow inbound HTTP traffic to ALB"
+  vpc_id      = module.vpc.vpc_id
 
-resource "aws_security_group" "ci_cd_sg" {
-  name        = "ci-cd-sg"
-  description = "Security group for Jenkins and SonarQube Quality Gate server"
-  vpc_id      = data.aws_vpc.default.id
-
-  # SSH
   ingress {
-    description = "SSH access"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Jenkins Web UI
-  ingress {
-    description = "Jenkins UI"
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # SonarQube Web UI
-  ingress {
-    description = "SonarQube UI"
-    from_port   = 9000
-    to_port     = 9000
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -221,117 +41,113 @@ resource "aws_security_group" "ci_cd_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+}
 
-  tags = {
-    Name = "ci-cd-sg"
+resource "aws_security_group" "app_sg" {
+  name        = "${var.environment}-app-sg"
+  description = "Allow traffic from ALB, Monitoring and Jenkins"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    description     = "Traffic from ALB"
+    from_port       = 8085
+    to_port         = 8085
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+  }
+
+  ingress {
+    description = "SSH from VPC / Jenkins"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Prometheus node exporter"
+    from_port   = 9100
+    to_port     = 9100
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-resource "aws_instance" "ci_cd_server" {
-  ami                    = data.aws_ami.amazon_linux_2.id
-  instance_type          = "t3.medium"
-  key_name               = var.key_name
-  vpc_security_group_ids = [aws_security_group.ci_cd_sg.id]
+resource "aws_security_group" "monitoring_sg" {
+  name        = "${var.environment}-monitoring-sg"
+  description = "Allow Prometheus, Grafana, and SSH access"
+  vpc_id      = module.vpc.vpc_id
 
-  root_block_device {
-    volume_size           = 30
-    volume_type           = "gp3"
-    delete_on_termination = true
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
-  user_data = <<-EOF
-              #!/bin/bash
-              set -e
+  ingress {
+    description = "Grafana UI"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-              # Optimize memory limits for Elasticsearch/SonarQube
-              sysctl -w vm.max_map_count=262144
-              echo "vm.max_map_count=262144" >> /etc/sysctl.conf
-              sysctl -w fs.file-max=65536
-              echo "fs.file-max=65536" >> /etc/sysctl.conf
+  ingress {
+    description = "Prometheus UI"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-              # Install Docker
-              yum update -y
-              amazon-linux-extras install docker -y || yum install -y docker
-              systemctl enable docker
-              systemctl start docker
-              usermod -aG docker ec2-user
-
-              # Create workspace for docker-compose
-              mkdir -p /opt/ci-cd
-              cd /opt/ci-cd
-
-              cat << 'DOCKERCOMPOSE' > docker-compose.yml
-              version: '3.8'
-
-              services:
-                jenkins:
-                  image: jenkins/jenkins:lts-jdk17
-                  container_name: jenkins
-                  restart: always
-                  privileged: true
-                  user: root
-                  ports:
-                    - "8080:8080"
-                    - "50000:50000"
-                  volumes:
-                    - /var/run/docker.sock:/var/run/docker.sock
-                    - /usr/bin/docker:/usr/bin/docker
-                    - jenkins_home:/var/jenkins_home
-
-                sonarqube:
-                  image: sonarqube:lts-community
-                  container_name: sonarqube
-                  restart: always
-                  ports:
-                    - "9000:9000"
-                  ulimits:
-                    nofile:
-                      soft: 65536
-                      hard: 65536
-                  volumes:
-                    - sonarqube_data:/opt/sonarqube/data
-                    - sonarqube_extensions:/opt/sonarqube/extensions
-                    - sonarqube_logs:/opt/sonarqube/logs
-
-              volumes:
-                jenkins_home:
-                sonarqube_data:
-                sonarqube_extensions:
-                sonarqube_logs:
-              DOCKERCOMPOSE
-
-              # Install Docker Compose binary
-              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-              chmod +x /usr/local/bin/docker-compose
-              ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-
-              # Launch Jenkins & SonarQube
-              docker-compose up -d
-              EOF
-
-  tags = {
-    Name = "Jenkins-SonarQube-Gate-Server"
-    Role = "ci-cd-controller"
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-# -----------------------------------------------------------------------------
-# DATA SOURCE: AMAZON LINUX 2 AMI
-# -----------------------------------------------------------------------------
-data "aws_ami" "amazon_linux_2" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
+# --- Application Load Balancer ---
+module "alb" {
+  source          = "./modules/alb"
+  vpc_id          = module.vpc.vpc_id
+  public_subnets  = module.vpc.public_subnet_ids
+  security_groups = [aws_security_group.alb_sg.id]
+  environment     = var.environment
+  app_port        = 8085
+  health_check_path = "/swagger-ui/index.html"
 }
 
-# -----------------------------------------------------------------------------
-# DATA SOURCE: AMAZON LINUX 2 AMI
+# --- Auto Scaling Group for Cards App ---
+module "asg" {
+  source            = "./modules/asg"
+  vpc_zone_subnets  = module.vpc.public_subnet_ids # Or private_subnet_ids if NAT deployed
+  security_groups   = [aws_security_group.app_sg.id]
+  key_name          = var.key_name
+  target_group_arns = [module.alb.target_group_arn]
+  instance_type     = "t3.micro"
+  environment       = var.environment
+  min_size          = 1
+  max_size          = 3
+  desired_capacity  = 1
+}
+
+# --- Dedicated Monitoring Instance ---
+module "monitoring" {
+  source          = "./modules/monitoring"
+  subnet_id       = module.vpc.public_subnet_ids[0]
+  security_groups = [aws_security_group.monitoring_sg.id]
+  key_name        = var.key_name
+  instance_type   = "t3.small"
+  environment     = var.environment
+}

@@ -1,0 +1,36 @@
+---
+- name: Authenticate Docker to ECR
+  ansible.builtin.shell: |
+    aws ecr get-login-password --region {{ aws_region }} | docker login --username AWS --password-stdin {{ ecr_url }}
+  environment:
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+
+- name: Stop running cards-service container
+  community.docker.docker_container:
+    name: cards-service
+    state: absent
+
+- name: Pull microservice container image from ECR
+  community.docker.docker_image:
+    name: "{{ ecr_url }}/cards-service:{{ app_version }}"
+    source: pull
+    force_source: true
+
+- name: Run cards-service container
+  community.docker.docker_container:
+    name: cards-service
+    image: "{{ ecr_url }}/cards-service:{{ app_version }}"
+    state: started
+    restart_policy: always
+    published_ports:
+      - "8085:8081"
+      - "8081:8081"
+
+- name: Verify Swagger UI endpoint returns HTTP 200
+  ansible.builtin.uri:
+    url: "http://localhost:8085/swagger-ui/index.html"
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 15
+  delay: 5

@@ -1,0 +1,21 @@
+---
+- name: Apply Common Base Configuration (Docker & Node Exporter)
+  hosts: all
+  become: true
+  roles:
+    - common
+
+- name: Deploy Banking Cards Microservice to Application Nodes
+  hosts: role_cards_backend
+  become: true
+  vars:
+    ecr_url: "107203103587.dkr.ecr.us-east-1.amazonaws.com"
+    aws_region: "us-east-1"
+  roles:
+    - cards_app
+
+- name: Deploy and Configure Monitoring Tier
+  hosts: role_monitoring
+  become: true
+  roles:
+    - monitoring
